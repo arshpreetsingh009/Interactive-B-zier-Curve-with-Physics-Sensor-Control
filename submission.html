@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bezier Rope Test</title>
+
+  <style>
+    html, body {
+      margin: 0;
+      height: 100%;
+      background: #111;
+      color: #ccc;
+      font-family: Arial, Helvetica, sans-serif;
+    }
+
+    canvas {
+      display: block;
+      margin: auto;
+      background: #0a0a0a;
+      box-shadow: 0 8px 25px rgba(0,0,0,0.6);
+    }
+
+    .info {
+      position: fixed;
+      top: 12px;
+      left: 12px;
+      font-size: 13px;
+      color: #bbb;
+    }
+
+    .info small {
+      color: #888;
+    }
+  </style>
+</head>
+
+<body>
+
+<div class="info">
+  Move mouse to bend the rope.<br>
+  Drag red / green points to lock them.
+  <br><small>Console has debug stuff</small>
+</div>
+
+<canvas id="c"></canvas>
+
+<script>
+/*
+  Small vector helpers.
+  Not using any library on purpose.
+*/
+function v(x, y) {
+  return { x: x || 0, y: y || 0 };
+}
+
+function vAdd(a, b) {
+  return { x: a.x + b.x, y: a.y + b.y };
+}
+
+function vSub(a, b) {
+  return { x: a.x - b.x, y: a.y - b.y };
+}
+
+function vMul(a, k) {
+  return { x: a.x * k, y: a.y * k };
+}
+
+function vLen(a) {
+  return Math.hypot(a.x, a.y);
+}
+
+function vUnit(a) {
+  const L = vLen(a) || 1;
+  return { x: a.x / L, y: a.y / L };
+}
+
+/* canvas setup */
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+function fitCanvas() {
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.min(window.innerWidth - 40, 1200);
+  const h = Math.min(window.innerHeight - 80, 700);
+
+  canvas.style.width = w + 'px';
+  canvas.style.height = h + 'px';
+  canvas.width = w * dpr;
+  canvas.height = h * dpr;
+
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+window.addEventListener('resize', fitCanvas);
+fitCanvas();
+
+/*
+  Endpoints of the rope
+*/
+const startPt = v(80, canvas.height / (window.devicePixelRatio||1) / 2);
+const endPt   = v(
+  canvas.width / (window.devicePixelRatio||1) - 80,
+  canvas.height / (window.devicePixelRatio||1) / 2
+);
+
+/*
+  Control points with simple spring motion
+*/
+const rope = {
+  c1: {
+    pos: v((startPt.x + endPt.x) / 3, startPt.y - 80),
+    vel: v(0, 0),
+    goal: v((startPt.x + endPt.x) / 3, startPt.y - 80)
+  },
+  c2: {
+    pos: v((startPt.x + endPt.x) * 2 / 3, startPt.y + 80),
+    vel: v(0, 0),
+    goal: v((startPt.x + endPt.x) * 2 / 3, startPt.y + 80)
+  }
+};
+
+/* physics tuning */
+let stiffness = 60;
+let friction = 12;
+const SPEED_LIMIT = 2000;
+
+/* mouse state */
+let mouse = { x: (startPt.x + endPt.x) / 2, y: startPt.y };
+let grabbed = null;
+
+canvas.addEventListener('mousemove', e => {
+  const r = canvas.getBoundingClientRect();
+  mouse.x = e.clientX - r.left;
+  mouse.y = e.clientY - r.top;
+
+  if (grabbed) {
+    rope[grabbed].goal = v(mouse.x, mouse.y);
+  }
+});
+
+canvas.addEventListener('mousedown', e => {
+  const r = canvas.getBoundingClientRect();
+  const mx = e.clientX - r.left;
+  const my = e.clientY - r.top;
+
+  if (Math.hypot(mx - rope.c1.pos.x, my - rope.c1.pos.y) < 18) {
+    grabbed = 'c1';
+  } else if (Math.hypot(mx - rope.c2.pos.x, my - rope.c2.pos.y) < 18) {
+    grabbed = 'c2';
+  } else {
+    rope.c1.goal = v(mx, my);
+    rope.c2.goal = v(mx, my);
+  }
+});
+
+window.addEventListener('mouseup', () => grabbed = null);
+
+/*
+  If nothing is dragged, auto-follow mouse
+*/
+function updateGoals() {
+  if (grabbed) return;
+
+  const gap = 60;
+  rope.c1.goal = v(mouse.x - gap, mouse.y - 40);
+  rope.c2.goal = v(mouse.x + gap, mouse.y + 40);
+}
+
+/*
+  Cubic Bezier math
+*/
+function bezier(t, p0, p1, p2, p3) {
+  const u = 1 - t;
+  return {
+    x:
+      u*u*u*p0.x +
+      3*u*u*t*p1.x +
+      3*u*t*t*p2.x +
+      t*t*t*p3.x,
+    y:
+      u*u*u*p0.y +
+      3*u*u*t*p1.y +
+      3*u*t*t*p2.y +
+      t*t*t*p3.y
+  };
+}
+
+function bezierSlope(t, p0, p1, p2, p3) {
+  const u = 1 - t;
+  return vAdd(
+    vAdd(
+      vMul(vSub(p1, p0), 3*u*u),
+      vMul(vSub(p2, p1), 6*u*t)
+    ),
+    vMul(vSub(p3, p2), 3*t*t)
+  );
+}
+
+/* drawing helpers */
+function wipe() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+}
+
+function drawRope() {
+  ctx.strokeStyle = '#66c2ff';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+
+  for (let i = 0; i <= 100; i++) {
+    const p = bezier(
+      i / 100,
+      startPt,
+      rope.c1.pos,
+      rope.c2.pos,
+      endPt
+    );
+    if (i === 0) ctx.moveTo(p.x, p.y);
+    else ctx.lineTo(p.x, p.y);
+  }
+
+  ctx.stroke();
+}
+
+function drawTangents() {
+  ctx.strokeStyle = '#ffd36b';
+  ctx.lineWidth = 1.2;
+
+  for (let i = 0; i <= 20; i++) {
+    const t = i / 20;
+    const p = bezier(t, startPt, rope.c1.pos, rope.c2.pos, endPt);
+    const d = vUnit(bezierSlope(t, startPt, rope.c1.pos, rope.c2.pos, endPt));
+
+    ctx.beginPath();
+    ctx.moveTo(p.x - d.x * 10, p.y - d.y * 10);
+    ctx.lineTo(p.x + d.x * 10, p.y + d.y * 10);
+    ctx.stroke();
+  }
+}
+
+function drawHandles() {
+  ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+  ctx.beginPath();
+  ctx.moveTo(startPt.x, startPt.y);
+  ctx.lineTo(rope.c1.pos.x, rope.c1.pos.y);
+  ctx.lineTo(rope.c2.pos.x, rope.c2.pos.y);
+  ctx.lineTo(endPt.x, endPt.y);
+  ctx.stroke();
+
+  function dot(p, r, c) {
+    ctx.beginPath();
+    ctx.fillStyle = c;
+    ctx.arc(p.x, p.y, r, 0, Math.PI*2);
+    ctx.fill();
+  }
+
+  dot(startPt, 6, '#4de');
+  dot(endPt, 6, '#4de');
+  dot(rope.c1.pos, 8, '#f66');
+  dot(rope.c2.pos, 8, '#6f6');
+}
+
+/* physics update */
+let prev = performance.now();
+
+function step(dt) {
+  updateGoals();
+
+  ['c1', 'c2'].forEach(k => {
+    const p = rope[k];
+    const diff = vSub(p.pos, p.goal);
+    const acc = vAdd(vMul(diff, -stiffness), vMul(p.vel, -friction));
+
+    p.vel.x += acc.x * dt;
+    p.vel.y += acc.y * dt;
+
+    const s = vLen(p.vel);
+    if (s > SPEED_LIMIT) {
+      p.vel = vMul(p.vel, SPEED_LIMIT / s);
+    }
+
+    p.pos.x += p.vel.x * dt;
+    p.pos.y += p.vel.y * dt;
+  });
+}
+
+/* main loop */
+function loop(t) {
+  const dt = Math.min(0.05, (t - prev) / 1000);
+  prev = t;
+
+  step(dt);
+  wipe();
+  drawRope();
+  drawTangents();
+  drawHandles();
+
+  requestAnimationFrame(loop);
+}
+
+requestAnimationFrame(loop);
+
+/* debug access */
+window.rope = rope;
+window.params = { stiffness, friction };
+</script>
+
+</body>
+</html>
